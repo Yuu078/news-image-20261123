@@ -6,6 +6,13 @@ the COP31 collapse, nine illustrated cards carry the next biggest
 stories, and THE WIRE carries the other 25 in two columns, with a
 region chip row and a DATE CHECK box at the foot.
 
+Everything on the page is drawn by one small shape engine: every
+picture on the poster is a list of shape records (rectangles,
+ellipses, polygons, lines, arcs, flames, smoke) and a single
+dispatcher paints them. Coordinates inside a picture are relative to
+that picture's box; a negative coordinate counts back from the far
+edge, so ground strips and right-hand details stay put.
+
 Drawn from scratch with Pillow. Deterministic: no clock, no random
 numbers, no network. The verification stamp is a constant fixed at
 build time, never read from the clock. The output is a 1024x1024 PNG
@@ -25,6 +32,7 @@ Box = namedtuple("Box", "x y w h")
 PAGE_W, PAGE_H = 1024, 1024
 EDGE = 16
 SPAN = PAGE_W - 2 * EDGE  # 992 px of content width
+E = 1000  # shape-record edge marker: -(E + n) counts n back from the far edge
 
 CREAM = (247, 242, 232)
 PAPER = (250, 246, 236)
@@ -89,6 +97,10 @@ def shrink(pen, text, start, floor, max_w):
     return size
 
 
+def txt(pen, x, y, s, fnt, fill=INK):
+    pen.text((x, y), s, font=fnt, fill=fill)
+
+
 def center(pen, y, text, fnt, fill=INK, x0=EDGE, x1=PAGE_W - EDGE):
     tw = pen.textlength(text, font=fnt)
     pen.text((x0 + (x1 - x0 - tw) / 2, y), text, font=fnt, fill=fill)
@@ -96,6 +108,162 @@ def center(pen, y, text, fnt, fill=INK, x0=EDGE, x1=PAGE_W - EDGE):
 
 def rule(pen, y, width=1, fill=INK, x0=EDGE, x1=PAGE_W - EDGE):
     pen.line([(x0, y), (x1, y)], fill=fill, width=width)
+
+
+def frame(pen, box, width=1, outline=INK):
+    pen.rectangle([box.x, box.y, box.x + box.w, box.y + box.h],
+                  outline=outline, width=width)
+
+
+# ---------------------------------------------------------------------------
+# Shape engine: one dispatcher paints every picture from shape records.
+# A record is a tuple whose first item names its kind; coordinates are
+# relative to the picture box, negative ones counting from the far edge.
+# ---------------------------------------------------------------------------
+
+def _rx(box, v):
+    if v <= -E:
+        return box.w + v + E
+    return v
+
+
+def _ry(box, v):
+    if v <= -E:
+        return box.h + v + E
+    return v
+
+
+def _pt(box, p):
+    return (box.x + _rx(box, p[0]), box.y + _ry(box, p[1]))
+
+
+def _box4(box, x0, y0, x1, y1):
+    return [box.x + _rx(box, x0), box.y + _ry(box, y0),
+            box.x + _rx(box, x1), box.y + _ry(box, y1)]
+
+
+def _flame(pen, box, cx, base, h, wdt):
+    cx = box.x + _rx(box, cx)
+    base = box.y + _ry(box, base)
+    pen.polygon([(cx - wdt, base), (cx, base - h), (cx + wdt, base)],
+                fill=(240, 120, 20))
+    pen.polygon([(cx - wdt // 2, base), (cx, base - int(h * 0.62)),
+                 (cx + wdt // 2, base)], fill=RED)
+
+
+def _smoke(pen, box, cx, cy, r, tone=(120, 120, 128)):
+    cx = box.x + _rx(box, cx)
+    cy = box.y + _ry(box, cy)
+    pen.ellipse([cx - r, cy - r, cx + r, cy + r], fill=tone)
+
+
+def _seat(pen, box, cx, top, wdt, hgt, fill, tipped=False):
+    cx = box.x + _rx(box, cx)
+    top = box.y + _ry(box, top)
+    if tipped:
+        pen.rectangle([cx - wdt // 2, top + hgt - 9, cx + wdt // 2,
+                       top + hgt - 3], fill=fill, outline=INK)
+        pen.rectangle([cx + wdt // 2 - 4, top + 4, cx + wdt // 2,
+                       top + hgt - 3], fill=fill, outline=INK)
+        return
+    back_h = int(hgt * 0.55)
+    pen.rectangle([cx - wdt // 2, top, cx + wdt // 2, top + back_h], fill=fill,
+                  outline=INK)
+    pen.rectangle([cx - wdt // 2, top + back_h, cx + wdt // 2,
+                   top + back_h + 4], fill=fill, outline=INK)
+    for lx in (cx - wdt // 2 + 2, cx + wdt // 2 - 2):
+        pen.line([(lx, top + back_h + 4), (lx, top + hgt)], fill=INK, width=2)
+
+
+def paint(pen, box, specs):
+    """Paint a list of shape records into box, in order."""
+    for spec in specs:
+        kind = spec[0]
+        if kind == "rect":
+            _, x0, y0, x1, y1, fill = spec[:6]
+            outl = spec[6] if len(spec) > 6 else None
+            wd = spec[7] if len(spec) > 7 else 1
+            kw = {"fill": fill}
+            if outl is not None:
+                kw["outline"] = outl
+                kw["width"] = wd
+            pen.rectangle(_box4(box, x0, y0, x1, y1), **kw)
+        elif kind == "ell":
+            _, x0, y0, x1, y1, fill = spec[:6]
+            outl = spec[6] if len(spec) > 6 else None
+            wd = spec[7] if len(spec) > 7 else 1
+            kw = {"fill": fill}
+            if outl is not None:
+                kw["outline"] = outl
+                kw["width"] = wd
+            pen.ellipse(_box4(box, x0, y0, x1, y1), **kw)
+        elif kind == "poly":
+            _, pts, fill = spec[:3]
+            outl = spec[3] if len(spec) > 3 else None
+            kw = {"fill": fill}
+            if outl is not None:
+                kw["outline"] = outl
+            pen.polygon([_pt(box, p) for p in pts], **kw)
+        elif kind == "line":
+            _, pts, fill, wd = spec
+            pen.line([_pt(box, p) for p in pts], fill=fill, width=wd)
+        elif kind == "arc":
+            _, x0, y0, x1, y1, a0, a1, fill, wd = spec
+            pen.arc(_box4(box, x0, y0, x1, y1), a0, a1, fill=fill, width=wd)
+        elif kind == "pie":
+            _, x0, y0, x1, y1, a0, a1, fill = spec[:8]
+            outl = spec[8] if len(spec) > 8 else None
+            kw = {"fill": fill}
+            if outl is not None:
+                kw["outline"] = outl
+            pen.pieslice(_box4(box, x0, y0, x1, y1), a0, a1, **kw)
+        elif kind == "flame":
+            _, cx, base, h, wdt = spec
+            _flame(pen, box, cx, base, h, wdt)
+        elif kind == "smoke":
+            _, cx, cy, r = spec[:4]
+            tone = spec[4] if len(spec) > 4 else (120, 120, 128)
+            _smoke(pen, box, cx, cy, r, tone)
+        elif kind == "seat":
+            _, cx, top, wdt, hgt, fill = spec[:6]
+            tipped = spec[6] if len(spec) > 6 else False
+            _seat(pen, box, cx, top, wdt, hgt, fill, tipped)
+        elif kind == "text":
+            _, x, y, s, size, fill = spec[:6]
+            bold = spec[6] if len(spec) > 6 else True
+            fnt = face(SANS_B if bold else SANS, size)
+            pen.text((box.x + _rx(box, x), box.y + _ry(box, y)), s,
+                     font=fnt, fill=fill)
+        else:
+            raise SystemExit("unknown shape kind: %r" % (kind,))
+
+
+def flag(pen, box, label):
+    f = face(SANS_B, 11)
+    tw = pen.textlength(label, font=f)
+    pen.rectangle([box.x, box.y, box.x + tw + 10, box.y + 16], fill=RED)
+    txt(pen, box.x + 5, box.y + 2, label, f, fill=(255, 255, 255))
+
+
+def ntag(pen, box, n):
+    f = face(SANS_B, 11)
+    t = str(n)
+    wdt = max(18, int(pen.textlength(t, font=f)) + 8)
+    pen.rectangle([box.x + box.w - wdt, box.y, box.x + box.w, box.y + 16],
+                  fill=RED)
+    txt(pen, box.x + box.w - wdt + (wdt - pen.textlength(t, font=f)) / 2,
+        box.y + 2, t, f, fill=(255, 255, 255))
+
+
+def plate(pen, box, num):
+    """Key number on a solid PAPER plate, bottom-right of the picture."""
+    size = 20 if len(num) <= 2 else (16 if len(num) <= 4 else 13)
+    f = face(SANS_B, size)
+    tw = pen.textlength(num, font=f)
+    cx1, cy1 = box.x + box.w - 4, box.y + box.h - 4
+    cx0, cy0 = cx1 - tw - 10, cy1 - size - 6
+    pen.rectangle([cx0, cy0, cx1, cy1], fill=PAPER, outline=INK, width=1)
+    txt(pen, cx0 + 5, cy0 + 2, num, f, fill=NAVY)
 
 
 # ---------------------------------------------------------------------------
@@ -227,413 +395,321 @@ def tally():
     return counts
 
 
+def need(cond, msg):
+    if not cond:
+        raise SystemExit(msg)
+
+
 def audit(pen):
     counts = tally()
-    if sum(counts.values()) != 35:
-        raise SystemExit("ledger holds %d stories, title says 35"
-                         % sum(counts.values()))
-    if len(CARDS) != 9:
-        raise SystemExit("grid expects exactly 9 cards")
-    if len(WIRE) != 25:
-        raise SystemExit("wire expects exactly 25 stories, got %d"
-                         % len(WIRE))
-    if set(counts) != set(REGION_LABEL) or len(counts) != 7:
-        raise SystemExit("regions present: %r" % (sorted(counts),))
+    need(sum(counts.values()) == 35,
+         "ledger holds %d stories, title says 35" % sum(counts.values()))
+    need(len(CARDS) == 9, "grid expects exactly 9 cards")
+    need(len(WIRE) == 25,
+         "wire expects exactly 25 stories, got %d" % len(WIRE))
+    need(set(counts) == set(REGION_LABEL) and len(counts) == 7,
+         "regions present: %r" % (sorted(counts),))
     expect = {"EU": 7, "APAC": 7, "ME": 5, "NA": 6, "AF": 4, "LATAM": 3,
               "GLOBAL": 3}
-    if dict(counts) != expect:
-        raise SystemExit("region counts %r != %r" % (dict(counts), expect))
-    if [n for n, _, _, _ in WIRE] != list(range(11, 36)):
-        raise SystemExit("wire numbering is not 11..35")
+    need(dict(counts) == expect,
+         "region counts %r != %r" % (dict(counts), expect))
+    need([n for n, _, _, _ in WIRE] == list(range(11, 36)),
+         "wire numbering is not 11..35")
     by_head = {c["headline"]: c["key"] for c in CARDS}
-    expected = [(HERO["key"], STRIP[0][0]),
-                (by_head["KYIV STRIKES KILL 15"], STRIP[1][0]),
-                (by_head["DEMOCRATS WIN HOUSE 258"], STRIP[2][0]),
-                (by_head["INDONESIA FACTORY FIRE TOLL 24"], STRIP[3][0])]
-    for got, want in expected:
-        if got != want:
-            raise SystemExit("strip/card mismatch: %r != %r" % (got, want))
-    if not (TITLE_SZ > DATE_SZ > HERO_SZ > STRIP_SZ > CARD_MIN):
-        raise SystemExit("type hierarchy broken")
+    pairs = [(HERO["key"], STRIP[0][0]),
+             (by_head["KYIV STRIKES KILL 15"], STRIP[1][0]),
+             (by_head["DEMOCRATS WIN HOUSE 258"], STRIP[2][0]),
+             (by_head["INDONESIA FACTORY FIRE TOLL 24"], STRIP[3][0])]
+    for got, want in pairs:
+        need(got == want, "strip/card mismatch: %r != %r" % (got, want))
+    need(TITLE_SZ > DATE_SZ > HERO_SZ > STRIP_SZ > CARD_MIN,
+         "type hierarchy broken")
     for card in CARDS:
         size = shrink(pen, card["headline"], CARD_SZ, CARD_MIN, 313)
-        if size < CARD_MIN:
-            raise SystemExit("headline under floor: %r" % card["headline"])
-        if len(wrap(pen, card["headline"], face(SANS_B, size), 313)) > 2:
-            raise SystemExit("headline wraps past 2: %r" % card["headline"])
-        if len(wrap(pen, card["body"], face(SANS, BODY_SZ), 313)) > 2:
-            raise SystemExit("body wraps past 2 lines: %r" % card["headline"])
+        need(size >= CARD_MIN, "headline under floor: %r" % card["headline"])
+        need(len(wrap(pen, card["headline"], face(SANS_B, size), 313)) <= 2,
+             "headline wraps past 2: %r" % card["headline"])
+        need(len(wrap(pen, card["body"], face(SANS, BODY_SZ), 313)) <= 2,
+             "body wraps past 2 lines: %r" % card["headline"])
     wf = face(SANS_B, WIRE_SZ)
     for n, _, head, src in WIRE:
         line = "%d \u00b7 %s (%s)" % (n, head, src)
-        if pen.textlength(line, font=wf) > 490:
-            raise SystemExit("wire line too wide: %r" % line)
+        need(pen.textlength(line, font=wf) <= 490,
+             "wire line too wide: %r" % line)
     return counts
 
 
 # ---------------------------------------------------------------------------
-# Small shared pieces
+# Card pictures, as shape records. Each function returns the records for
+# one 323x46 picture; paint() draws them in order. E counts back from
+# the far edge (see _rx/_ry): -(E+6) is six pixels up from the bottom.
 # ---------------------------------------------------------------------------
 
-def flag(pen, box, label):
-    f = face(SANS_B, 11)
-    tw = pen.textlength(label, font=f)
-    pen.rectangle([box.x, box.y, box.x + tw + 10, box.y + 16], fill=RED)
-    pen.text((box.x + 5, box.y + 2), label, font=f, fill=(255, 255, 255))
-
-
-def ntag(pen, box, n):
-    f = face(SANS_B, 11)
-    t = str(n)
-    wdt = max(18, int(pen.textlength(t, font=f)) + 8)
-    pen.rectangle([box.x + box.w - wdt, box.y, box.x + box.w, box.y + 16],
-                  fill=RED)
-    pen.text((box.x + box.w - wdt + (wdt - pen.textlength(t, font=f)) / 2,
-              box.y + 2), t, font=f, fill=(255, 255, 255))
-
-
-def plate(pen, box, num):
-    """Key number on a solid PAPER plate, bottom-right of the scene."""
-    size = 20 if len(num) <= 2 else (16 if len(num) <= 4 else 13)
-    f = face(SANS_B, size)
-    tw = pen.textlength(num, font=f)
-    cx1, cy1 = box.x + box.w - 4, box.y + box.h - 4
-    cx0, cy0 = cx1 - tw - 10, cy1 - size - 6
-    pen.rectangle([cx0, cy0, cx1, cy1], fill=PAPER, outline=INK, width=1)
-    pen.text((cx0 + 5, cy0 + 2), num, font=f, fill=NAVY)
-
-
-def tongue(pen, cx, base, h, wdt):
-    pen.polygon([(cx - wdt, base), (cx, base - h), (cx + wdt, base)],
-                fill=(240, 120, 20))
-    pen.polygon([(cx - wdt // 2, base), (cx, base - int(h * 0.62)),
-                 (cx + wdt // 2, base)], fill=RED)
-
-
-def puff(pen, cx, cy, r, tone=(120, 120, 128)):
-    pen.ellipse([cx - r, cy - r, cx + r, cy + r], fill=tone)
-
-
-# ---------------------------------------------------------------------------
-# Card artwork: compact flat illustrations for a 323x46 box, no text inside.
-# ---------------------------------------------------------------------------
-
-def art_kyiv(pen, b):
-    pen.rectangle([b.x, b.y, b.x + b.w, b.y + b.h], fill=(196, 202, 210))
-    pen.rectangle([b.x, b.y + b.h - 6, b.x + b.w, b.y + b.h],
-                  fill=(120, 112, 100))
-    # intact block, left, windows lit
-    pen.rectangle([b.x + 14, b.y + 8, b.x + 120, b.y + b.h - 6],
-                  fill=(150, 142, 128), outline=INK)
+def _kyiv():
+    art = [
+        ("rect", 0, 0, -E, -E, (196, 202, 210)),
+        ("rect", 0, -(E + 6), -E, -E, (120, 112, 100)),
+        ("rect", 14, 8, 120, -(E + 6), (150, 142, 128), INK),
+        ("poly", [(140, -(E + 6)), (140, 22), (158, 14), (172, 26),
+                  (190, 18), (206, 30), (206, -(E + 6))], (110, 102, 90),
+         INK),
+        ("poly", [(206, -(E + 6)), (226, 30), (246, -(E + 6))], (90, 84, 74)),
+        ("flame", 172, 22, 14, 7),
+        ("smoke", 176, 6, 5),
+        ("smoke", 188, 3, 4, (150, 150, 158)),
+        ("line", [(262, 18), (262, -(E + 6))], INK, 4),
+        ("ell", 258, 10, 266, 18, INK),
+        ("line", [(262, 24), (252, 34)], INK, 3),
+        ("rect", 276, 28, 312, 34, RED, INK),
+    ]
     for r in range(2):
         for c in range(4):
-            pen.rectangle([b.x + 24 + c * 24, b.y + 14 + r * 14,
-                           b.x + 36 + c * 24, b.y + 24 + r * 14],
-                          fill=(255, 214, 120))
-    # collapsed block, centre: jagged top, rubble at its foot
-    pen.polygon([(b.x + 140, b.y + b.h - 6), (b.x + 140, b.y + 22),
-                 (b.x + 158, b.y + 14), (b.x + 172, b.y + 26),
-                 (b.x + 190, b.y + 18), (b.x + 206, b.y + 30),
-                 (b.x + 206, b.y + b.h - 6)], fill=(110, 102, 90), outline=INK)
-    pen.polygon([(b.x + 206, b.y + b.h - 6), (b.x + 226, b.y + b.h - 16),
-                 (b.x + 246, b.y + b.h - 6)], fill=(90, 84, 74))
-    tongue(pen, b.x + 172, b.y + 22, 14, 7)
-    puff(pen, b.x + 176, b.y + 6, 5)
-    puff(pen, b.x + 188, b.y + 3, 4, tone=(150, 150, 158))
-    # rescuer with a stretcher, right
-    pen.line([(b.x + 262, b.y + 18), (b.x + 262, b.y + b.h - 6)], fill=INK,
-             width=4)
-    pen.ellipse([b.x + 258, b.y + 10, b.x + 266, b.y + 18], fill=INK)
-    pen.line([(b.x + 262, b.y + 24), (b.x + 252, b.y + 34)], fill=INK, width=3)
-    pen.rectangle([b.x + 276, b.y + 28, b.x + 312, b.y + 34], fill=RED,
-                  outline=INK)
+            art.append(("rect", 24 + c * 24, 14 + r * 14, 36 + c * 24,
+                        24 + r * 14, (255, 214, 120)))
+    return art
 
 
-def art_iran(pen, b):
-    pen.rectangle([b.x, b.y, b.x + b.w, b.y + 20], fill=SKY)
-    pen.rectangle([b.x, b.y + 20, b.x + b.w, b.y + b.h], fill=SEA)
+def _iran():
+    art = [
+        ("rect", 0, 0, -E, 20, SKY),
+        ("rect", 0, 20, -E, -E, SEA),
+    ]
     for wy in (28, 38):
-        for wx in range(2, b.w - 10, 26):
-            pen.arc([b.x + wx, b.y + wy - 3, b.x + wx + 24, b.y + wy + 5],
-                    180, 360, fill=(255, 255, 255), width=2)
-    # grey warship: hull, bridge, mast, flag
-    pen.polygon([(b.x + 60, b.y + 22), (b.x + 250, b.y + 22),
-                 (b.x + 238, b.y + 36), (b.x + 72, b.y + 36)],
-                fill=(90, 96, 104), outline=INK)
-    pen.rectangle([b.x + 150, b.y + 8, b.x + 190, b.y + 22],
-                  fill=(120, 126, 134), outline=INK)
-    pen.line([(b.x + 170, b.y + 8), (b.x + 170, b.y - 2)], fill=INK, width=3)
-    pen.polygon([(b.x + 170, b.y - 2), (b.x + 186, b.y + 2),
-                 (b.x + 170, b.y + 6)], fill=RED)
-    pen.rectangle([b.x + 96, b.y + 14, b.x + 120, b.y + 22], fill=(70, 76, 84),
-                  outline=INK)
-    # small patrol boat, right
-    pen.polygon([(b.x + 272, b.y + 30), (b.x + 312, b.y + 30),
-                 (b.x + 304, b.y + 38), (b.x + 280, b.y + 38)],
-                fill=(60, 66, 74), outline=INK)
+        for wx in range(2, 313, 26):
+            art.append(("arc", wx, wy - 3, wx + 24, wy + 5, 180, 360,
+                        (255, 255, 255), 2))
+    art += [
+        ("poly", [(60, 22), (250, 22), (238, 36), (72, 36)], (90, 96, 104),
+         INK),
+        ("rect", 150, 8, 190, 22, (120, 126, 134), INK),
+        ("line", [(170, 8), (170, -2)], INK, 3),
+        ("poly", [(170, -2), (186, 2), (170, 6)], RED),
+        ("rect", 96, 14, 120, 22, (70, 76, 84), INK),
+        ("poly", [(272, 30), (312, 30), (304, 38), (280, 38)], (60, 66, 74),
+         INK),
+    ]
+    return art
 
 
-def art_hormuz(pen, b):
-    pen.rectangle([b.x, b.y, b.x + b.w, b.y + 14], fill=SKY)
-    pen.rectangle([b.x, b.y + 14, b.x + b.w, b.y + b.h], fill=SEA)
+def _hormuz():
+    art = [
+        ("rect", 0, 0, -E, 14, SKY),
+        ("rect", 0, 14, -E, -E, SEA),
+    ]
     for wy in (24, 34):
-        for wx in range(2, b.w - 10, 26):
-            pen.arc([b.x + wx, b.y + wy - 3, b.x + wx + 24, b.y + wy + 5],
-                    180, 360, fill=(255, 255, 255), width=2)
-    # tanker: hull, containers, bridge tower
-    pen.polygon([(b.x + 30, b.y + 22), (b.x + 240, b.y + 22),
-                 (b.x + 228, b.y + 34), (b.x + 42, b.y + 34)],
-                fill=(40, 40, 44), outline=INK)
-    pen.rectangle([b.x + 30, b.y + 19, b.x + 240, b.y + 22], fill=RED)
+        for wx in range(2, 313, 26):
+            art.append(("arc", wx, wy - 3, wx + 24, wy + 5, 180, 360,
+                        (255, 255, 255), 2))
+    art += [
+        ("poly", [(30, 22), (240, 22), (228, 34), (42, 34)], (40, 40, 44),
+         INK),
+        ("rect", 30, 19, 240, 22, RED),
+    ]
     for i, c in enumerate([(200, 60, 40), (40, 120, 70), (220, 180, 40),
                            (58, 88, 132)]):
-        pen.rectangle([b.x + 66 + i * 28, b.y + 10, b.x + 90 + i * 28,
-                       b.y + 19], fill=c, outline=INK)
-    pen.rectangle([b.x + 200, b.y + 4, b.x + 224, b.y + 19],
-                  fill=(255, 255, 255), outline=INK)
-    tongue(pen, b.x + 110, b.y + 12, 14, 7)
-    puff(pen, b.x + 114, b.y + 2, 4)
-    # second tanker, distant right
-    pen.rectangle([b.x + 262, b.y + 20, b.x + 312, b.y + 26],
-                  fill=(40, 40, 44))
-    pen.rectangle([b.x + 288, b.y + 14, b.x + 298, b.y + 20],
-                  fill=(40, 40, 44))
+        art.append(("rect", 66 + i * 28, 10, 90 + i * 28, 19, c, INK))
+    art += [
+        ("rect", 200, 4, 224, 19, (255, 255, 255), INK),
+        ("flame", 110, 12, 14, 7),
+        ("smoke", 114, 2, 4),
+        ("rect", 262, 20, 312, 26, (40, 40, 44)),
+        ("rect", 288, 14, 298, 20, (40, 40, 44)),
+    ]
+    return art
 
 
-def art_capitol(pen, b):
-    pen.rectangle([b.x, b.y, b.x + b.w, b.y + 30], fill=SKY)
-    pen.rectangle([b.x, b.y + 30, b.x + b.w, b.y + b.h], fill=(46, 125, 60))
-    # capitol dome: drum, dome, statue spike, wings
-    cx = b.x + b.w // 2
-    pen.rectangle([cx - 52, b.y + 22, cx + 52, b.y + 30],
-                  fill=(255, 255, 255), outline=INK)
+def _capitol():
+    art = [
+        ("rect", 0, 0, -E, 30, SKY),
+        ("rect", 0, 30, -E, -E, (46, 125, 60)),
+        ("rect", 109, 22, 213, 30, (255, 255, 255), INK),
+        ("rect", 131, 16, 191, 22, (255, 255, 255), INK),
+        ("pie", 131, -6, 191, 18, 180, 360, (255, 255, 255), INK),
+        ("line", [(161, -6), (161, -12)], INK, 2),
+        ("ell", 159, -14, 163, -10, INK),
+        ("line", [(26, 4), (26, 30)], INK, 2),
+        ("poly", [(26, 4), (46, 8), (26, 12)], RED),
+    ]
     for i in range(5):
-        pen.rectangle([cx - 46 + i * 20, b.y + 24, cx - 40 + i * 20,
-                       b.y + 30], fill=NAVY)
-    pen.rectangle([cx - 30, b.y + 16, cx + 30, b.y + 22],
-                  fill=(255, 255, 255), outline=INK)
-    pen.pieslice([cx - 30, b.y - 6, cx + 30, b.y + 18], 180, 360,
-                 fill=(255, 255, 255), outline=INK)
-    pen.line([(cx, b.y - 6), (cx, b.y - 12)], fill=INK, width=2)
-    pen.ellipse([cx - 2, b.y - 14, cx + 2, b.y - 10], fill=INK)
-    # flag pole, left
-    pen.line([(b.x + 26, b.y + 4), (b.x + 26, b.y + 30)], fill=INK, width=2)
-    pen.polygon([(b.x + 26, b.y + 4), (b.x + 46, b.y + 8),
-                 (b.x + 26, b.y + 12)], fill=RED)
+        art.append(("rect", 115 + i * 20, 24, 121 + i * 20, 30, NAVY))
+    return art
 
 
-def art_chart(pen, b):
-    pen.rectangle([b.x, b.y, b.x + b.w, b.y + b.h], fill=(255, 255, 255))
+def _chart():
+    art = [
+        ("rect", 0, 0, -E, -E, (255, 255, 255)),
+    ]
     for gy in (12, 24, 36):
-        pen.line([(b.x + 12, b.y + gy), (b.x + b.w - 8, b.y + gy)],
-                 fill=(225, 225, 225), width=1)
-    pen.line([(b.x + 12, b.y + 4), (b.x + 12, b.y + b.h - 6)], fill=INK,
-             width=2)
-    pen.line([(b.x + 12, b.y + b.h - 6), (b.x + b.w - 8, b.y + b.h - 6)],
-             fill=INK, width=2)
-    pts = [(b.x + 22, b.y + 8), (b.x + 80, b.y + 10), (b.x + 130, b.y + 9),
-           (b.x + 180, b.y + 18), (b.x + 225, b.y + 28),
-           (b.x + 268, b.y + 38)]
-    pen.line(pts, fill=RED, width=4)
-    for px, py in pts:
-        pen.ellipse([px - 3, py - 3, px + 3, py + 3], fill=RED)
-    pen.polygon([(b.x + 268, b.y + 42), (b.x + 259, b.y + 30),
-                 (b.x + 277, b.y + 31)], fill=RED)
+        art.append(("line", [(12, gy), (-(E + 8), gy)], (225, 225, 225), 1))
+    art += [
+        ("line", [(12, 4), (12, -(E + 6))], INK, 2),
+        ("line", [(12, -(E + 6)), (-(E + 8), -(E + 6))], INK, 2),
+        ("line", [(22, 8), (80, 10), (130, 9), (180, 18), (225, 28),
+                  (268, 38)], RED, 4),
+    ]
+    for px, py in [(22, 8), (80, 10), (130, 9), (180, 18), (225, 28),
+                   (268, 38)]:
+        art.append(("ell", px - 3, py - 3, px + 3, py + 3, RED))
+    art.append(("poly", [(268, 42), (259, 30), (277, 31)], RED))
     for bx, bh, c in [(40, 8, (46, 125, 60)), (100, 12, (46, 125, 60)),
                       (210, 6, RED), (255, 4, RED)]:
-        pen.rectangle([b.x + bx, b.y + b.h - 6 - bh, b.x + bx + 20,
-                       b.y + b.h - 6], fill=c)
+        art.append(("rect", bx, 40 - bh, bx + 20, -(E + 6), c))
+    return art
 
 
-def art_indonesia(pen, b):
-    pen.rectangle([b.x, b.y, b.x + b.w, b.y + b.h], fill=(238, 228, 208))
-    pen.rectangle([b.x, b.y + b.h - 4, b.x + b.w, b.y + b.h],
-                  fill=(150, 120, 80))
-    # factory block with sawtooth roof + chimney
-    pen.rectangle([b.x + 18, b.y + 18, b.x + 160, b.y + b.h - 4],
-                  fill=(128, 84, 52), outline=INK)
+def _indonesia():
+    art = [
+        ("rect", 0, 0, -E, -E, (238, 228, 208)),
+        ("rect", 0, -(E + 4), -E, -E, (150, 120, 80)),
+        ("rect", 18, 18, 160, -(E + 4), (128, 84, 52), INK),
+    ]
     for i in range(3):
-        pen.polygon([(b.x + 18 + i * 48, b.y + 18),
-                     (b.x + 42 + i * 48, b.y + 8),
-                     (b.x + 66 + i * 48, b.y + 18)], fill=(96, 56, 34))
-    pen.rectangle([b.x + 170, b.y + 4, b.x + 182, b.y + b.h - 4],
-                  fill=(110, 110, 116), outline=INK)
+        art.append(("poly", [(18 + i * 48, 18), (42 + i * 48, 8),
+                             (66 + i * 48, 18)], (96, 56, 34)))
+    art.append(("rect", 170, 4, 182, -(E + 4), (110, 110, 116), INK))
     for wx in range(28, 150, 20):
-        pen.rectangle([b.x + wx, b.y + 24, b.x + wx + 11, b.y + 32],
-                      fill=(255, 214, 120))
-    tongue(pen, b.x + 88, b.y + 12, 16, 9)
-    puff(pen, b.x + 178, b.y + 2, 5)
-    puff(pen, b.x + 108, b.y + 2, 4, tone=(150, 150, 150))
-    # fire truck with ladder
-    pen.rectangle([b.x + 220, b.y + 28, b.x + 300, b.y + 38], fill=RED,
-                  outline=INK)
-    pen.rectangle([b.x + 280, b.y + 22, b.x + 300, b.y + 28], fill=RED,
-                  outline=INK)
-    pen.line([(b.x + 226, b.y + 28), (b.x + 200, b.y + 14)], fill=INK, width=3)
+        art.append(("rect", wx, 24, wx + 11, 32, (255, 214, 120)))
+    art += [
+        ("flame", 88, 12, 16, 9),
+        ("smoke", 178, 2, 5),
+        ("smoke", 108, 2, 4, (150, 150, 150)),
+        ("rect", 220, 28, 300, 38, RED, INK),
+        ("rect", 280, 22, 300, 28, RED, INK),
+        ("line", [(226, 28), (200, 14)], INK, 3),
+    ]
     for wx in (234, 284):
-        pen.ellipse([b.x + wx, b.y + 36, b.x + wx + 11, b.y + 45], fill=INK)
+        art.append(("ell", wx, 36, wx + 11, 45, INK))
+    return art
 
 
-def art_tennis(pen, b):
-    pen.rectangle([b.x, b.y, b.x + b.w, b.y + b.h], fill=(46, 125, 60))
-    pen.rectangle([b.x, b.y + b.h - 8, b.x + b.w, b.y + b.h],
-                  fill=(30, 90, 44))
-    pen.rectangle([b.x + 30, b.y + 6, b.x + b.w - 30, b.y + b.h - 8],
-                  fill=(58, 140, 74), outline=(255, 255, 255), width=2)
-    pen.line([(b.x + b.w // 2, b.y + 6), (b.x + b.w // 2, b.y + b.h - 8)],
-             fill=(255, 255, 255), width=2)
-    # net across the middle
-    pen.line([(b.x + 30, b.y + b.h // 2), (b.x + b.w - 30, b.y + b.h // 2)],
-             fill=(255, 255, 255), width=3)
-    for nx in range(b.x + 34, b.x + b.w - 30, 10):
-        pen.line([(nx, b.y + b.h // 2 - 4), (nx, b.y + b.h // 2 + 4)],
-                 fill=(200, 200, 200), width=1)
-    # ball mid-air + racket arc, left
-    pen.ellipse([b.x + 250, b.y + 8, b.x + 262, b.y + 20],
-                fill=(220, 240, 60), outline=INK)
-    pen.arc([b.x + 40, b.y + 2, b.x + 90, b.y + 40], 300, 60,
-            fill=(255, 255, 255), width=3)
-    pen.line([(b.x + 78, b.y + 26), (b.x + 96, b.y + 40)],
-             fill=(255, 255, 255), width=3)
+def _tennis():
+    art = [
+        ("rect", 0, 0, -E, -E, (46, 125, 60)),
+        ("rect", 0, -(E + 8), -E, -E, (30, 90, 44)),
+        ("rect", 30, 6, -(E + 30), -(E + 8), (58, 140, 74),
+         (255, 255, 255), 2),
+        ("line", [(161, 6), (161, -(E + 8))], (255, 255, 255), 2),
+        ("line", [(30, 23), (293, 23)], (255, 255, 255), 3),
+    ]
+    for nx in range(34, 293, 10):
+        art.append(("line", [(nx, 19), (nx, 27)], (200, 200, 200), 1))
+    art += [
+        ("ell", 250, 8, 262, 20, (220, 240, 60), INK),
+        ("arc", 40, 2, 90, 40, 300, 60, (255, 255, 255), 3),
+        ("line", [(78, 26), (96, 40)], (255, 255, 255), 3),
+    ]
+    return art
 
 
-def art_football(pen, b):
-    pen.rectangle([b.x, b.y, b.x + b.w, b.y + b.h], fill=(46, 125, 60))
-    pen.rectangle([b.x, b.y + b.h - 8, b.x + b.w, b.y + b.h],
-                  fill=(30, 90, 44))
-    pen.line([(b.x + b.w // 2, b.y), (b.x + b.w // 2, b.y + b.h - 8)],
-             fill=(255, 255, 255), width=2)
-    pen.ellipse([b.x + b.w // 2 - 22, b.y + 6, b.x + b.w // 2 + 22,
-                 b.y + b.h - 14], outline=(255, 255, 255), width=2)
-    # goal, right
-    pen.rectangle([b.x + b.w - 52, b.y + 8, b.x + b.w - 10, b.y + 34],
-                  outline=(255, 255, 255), width=3)
-    for gx in range(b.x + b.w - 50, b.x + b.w - 10, 8):
-        pen.line([(gx, b.y + 8), (gx, b.y + 34)], fill=(255, 255, 255), width=1)
-    # ball + boot, left
-    pen.ellipse([b.x + 40, b.y + 22, b.x + 56, b.y + 38],
-                fill=(255, 255, 255), outline=INK)
-    pen.polygon([(b.x + 42, b.y + 26), (b.x + 48, b.y + 26),
-                 (b.x + 46, b.y + 32), (b.x + 42, b.y + 32)], fill=INK)
-    pen.line([(b.x + 90, b.y + 38), (b.x + 60, b.y + 32)], fill=INK, width=4)
+def _football():
+    art = [
+        ("rect", 0, 0, -E, -E, (46, 125, 60)),
+        ("rect", 0, -(E + 8), -E, -E, (30, 90, 44)),
+        ("line", [(161, 0), (161, -(E + 8))], (255, 255, 255), 2),
+        ("ell", 139, 6, 183, -(E + 14), None, (255, 255, 255), 2),
+        ("rect", 271, 8, 313, 34, None, (255, 255, 255), 3),
+        ("ell", 40, 22, 56, 38, (255, 255, 255), INK),
+        ("poly", [(42, 26), (48, 26), (46, 32), (42, 32)], INK),
+        ("line", [(90, 38), (60, 32)], INK, 4),
+    ]
+    for gx in range(273, 313, 8):
+        art.append(("line", [(gx, 8), (gx, 34)], (255, 255, 255), 1))
+    return art
 
 
-def art_sudan(pen, b):
-    pen.rectangle([b.x, b.y, b.x + b.w, b.y + b.h], fill=(24, 28, 52))
+def _sudan():
+    art = [
+        ("rect", 0, 0, -E, -E, (24, 28, 52)),
+    ]
     for sx, sy in [(30, 6), (90, 10), (180, 5), (250, 9), (300, 6)]:
-        pen.ellipse([b.x + sx, b.y + sy, b.x + sx + 2, b.y + sy + 2],
-                    fill=(255, 255, 255))
-    pen.ellipse([b.x + b.w - 48, b.y + 4, b.x + b.w - 28, b.y + 24],
-                fill=(250, 214, 120))
-    pen.rectangle([b.x, b.y + b.h - 6, b.x + b.w, b.y + b.h],
-                  fill=(120, 100, 80))
-    # damaged house, left: broken roof, smoke
-    pen.rectangle([b.x + 16, b.y + 22, b.x + 110, b.y + b.h - 6],
-                  fill=(150, 130, 100), outline=INK)
-    pen.polygon([(b.x + 10, b.y + 22), (b.x + 63, b.y + 8),
-                 (b.x + 90, b.y + 22)], fill=(120, 70, 44))
-    pen.polygon([(b.x + 90, b.y + 22), (b.x + 116, b.y + 22),
-                 (b.x + 104, b.y + 12)], fill=(90, 60, 40))
-    puff(pen, b.x + 66, b.y + 4, 4, tone=(150, 150, 158))
-    # quadcopter drone, centre-right, with rotor blur
-    cx, cy = b.x + 210, b.y + 16
-    pen.rectangle([cx - 14, cy - 4, cx + 14, cy + 4], fill=(200, 200, 200),
-                  outline=INK)
+        art.append(("ell", sx, sy, sx + 2, sy + 2, (255, 255, 255)))
+    art += [
+        ("ell", 275, 4, 295, 24, (250, 214, 120)),
+        ("rect", 0, -(E + 6), -E, -E, (120, 100, 80)),
+        ("rect", 16, 22, 110, -(E + 6), (150, 130, 100), INK),
+        ("poly", [(10, 22), (63, 8), (90, 22)], (120, 70, 44)),
+        ("poly", [(90, 22), (116, 22), (104, 12)], (90, 60, 40)),
+        ("smoke", 66, 4, 4, (150, 150, 158)),
+        ("rect", 196, 12, 224, 20, (200, 200, 200), INK),
+    ]
     for ox in (-18, 18):
-        pen.ellipse([cx + ox - 8, cy - 3, cx + ox + 8, cy + 3],
-                    fill=(180, 180, 180))
-        pen.line([(cx + ox - 12, cy), (cx + ox + 12, cy)],
-                 fill=(255, 255, 255), width=2)
-    pen.line([(cx - 14, cy), (cx - 20, cy - 8)], fill=(200, 200, 200), width=2)
-    pen.line([(cx + 14, cy), (cx + 20, cy - 8)], fill=(200, 200, 200), width=2)
+        art.append(("ell", 210 + ox - 8, 13, 210 + ox + 8, 19,
+                    (180, 180, 180)))
+        art.append(("line", [(210 + ox - 12, 16), (210 + ox + 12, 16)],
+                    (255, 255, 255), 2))
+    art += [
+        ("line", [(196, 16), (190, 8)], (200, 200, 200), 2),
+        ("line", [(224, 16), (230, 8)], (200, 200, 200), 2),
+    ]
+    return art
 
 
 ART = {
-    "kyiv": art_kyiv,
-    "iran": art_iran,
-    "hormuz": art_hormuz,
-    "capitol": art_capitol,
-    "chart": art_chart,
-    "indonesia": art_indonesia,
-    "tennis": art_tennis,
-    "football": art_football,
-    "sudan": art_sudan,
+    "kyiv": _kyiv(),
+    "iran": _iran(),
+    "hormuz": _hormuz(),
+    "capitol": _capitol(),
+    "chart": _chart(),
+    "indonesia": _indonesia(),
+    "tennis": _tennis(),
+    "football": _football(),
+    "sudan": _sudan(),
 }
 
 
 # ---------------------------------------------------------------------------
-# Hero artwork: the empty COP31 summit hall.
+# Hero picture: the empty COP31 summit hall, as shape records plus two
+# small loops (nameplates, chairs) and the giant 0 drawn as text.
 # ---------------------------------------------------------------------------
 
-def _seat(pen, cx, top, wdt, hgt, fill, tipped=False):
-    if tipped:
-        pen.rectangle([cx - wdt // 2, top + hgt - 9, cx + wdt // 2,
-                       top + hgt - 3], fill=fill, outline=INK)
-        pen.rectangle([cx + wdt // 2 - 4, top + 4, cx + wdt // 2,
-                       top + hgt - 3], fill=fill, outline=INK)
-        return
-    back_h = int(hgt * 0.55)
-    pen.rectangle([cx - wdt // 2, top, cx + wdt // 2, top + back_h], fill=fill,
-                  outline=INK)
-    pen.rectangle([cx - wdt // 2, top + back_h, cx + wdt // 2,
-                   top + back_h + 4], fill=fill, outline=INK)
-    for lx in (cx - wdt // 2 + 2, cx + wdt // 2 - 2):
-        pen.line([(lx, top + back_h + 4), (lx, top + hgt)], fill=INK, width=2)
-
-
-def art_summit(pen, b):
-    pen.rectangle([b.x, b.y, b.x + b.w, b.y + b.h], fill=(188, 206, 228))
-    pen.rectangle([b.x, b.y + 96, b.x + b.w, b.y + b.h], fill=(168, 188, 212))
-    # side screens: globe left, bars right
-    pen.rectangle([b.x + 10, b.y + 8, b.x + 74, b.y + 52],
-                  fill=(240, 246, 252), outline=INK, width=2)
-    cx, cy, r = b.x + 42, b.y + 30, 16
-    pen.ellipse([cx - r, cy - r, cx + r, cy + r], outline=NAVY, width=2)
-    pen.ellipse([cx - r // 2, cy - r, cx + r // 2, cy + r], outline=NAVY,
-                width=1)
-    pen.line([(cx - r, cy), (cx + r, cy)], fill=NAVY, width=1)
-    pen.rectangle([b.x + b.w - 74, b.y + 8, b.x + b.w - 10, b.y + 52],
-                  fill=(240, 246, 252), outline=INK, width=2)
-    base = b.y + 48
-    pen.line([(b.x + b.w - 66, base), (b.x + b.w - 16, base)], fill=INK,
-             width=1)
+def _summit():
+    art = [
+        ("rect", 0, 0, -E, -E, (188, 206, 228)),
+        ("rect", 0, 96, -E, -E, (168, 188, 212)),
+        ("rect", 10, 8, 74, 52, (240, 246, 252), INK, 2),
+        ("ell", 26, 14, 58, 46, None, NAVY, 2),
+        ("ell", 34, 14, 50, 46, None, NAVY, 1),
+        ("line", [(26, 30), (58, 30)], NAVY, 1),
+        ("rect", 306, 8, 370, 52, (240, 246, 252), INK, 2),
+        ("line", [(314, 48), (364, 48)], INK, 1),
+        ("rect", 12, 88, 368, 97, (146, 108, 66), INK, 1),
+        ("poly", [(179, 101), (201, 101), (205, 122), (175, 122)], NAVY,
+         INK),
+    ]
     for i, bh in enumerate((10, 17, 25)):
-        bx = b.x + b.w - 62 + i * 17
-        pen.rectangle([bx, base - bh, bx + 11, base],
-                      fill=STEEL if i < 2 else RED)
-    # giant 0 over the empty hall
+        bx = 318 + i * 17
+        art.append(("rect", bx, 48 - bh, bx + 11, 48,
+                    STEEL if i < 2 else RED))
+    for i, cx in enumerate(range(40, 356, 52)):
+        if i in (2, 5):
+            art.append(("poly", [(cx - 10, 84), (cx + 10, 86),
+                                 (cx + 10, 93), (cx - 10, 91)],
+                        (255, 255, 255), INK))
+        else:
+            art.append(("rect", cx - 10, 82, cx + 10, 90,
+                        (255, 255, 255), INK))
+    for i, cx in enumerate(range(40, 356, 52)):
+        if abs(cx - 190) < 30:
+            continue
+        art.append(("seat", cx, 103, 22, 20, NAVY, i == 5))
+    for i, cx in enumerate(range(28, 368, 52)):
+        art.append(("seat", cx, 124, 24, 15, STEEL, i == 1))
+    return art
+
+
+def _zero(pen, box):
+    """The giant red 0 with a paper halo, and its caption line."""
     zf = face(SANS_B, 64)
     zw = pen.textlength("0", font=zf)
-    zx, zy = b.x + (b.w - zw) / 2, b.y + 0
+    zx = box.x + (box.w - zw) / 2
+    zy = box.y + 0
     for ox, oy in ((-2, 0), (2, 0), (0, -2), (0, 2)):
-        pen.text((zx + ox, zy + oy), "0", font=zf, fill=PAPER)
-    pen.text((zx, zy), "0", font=zf, fill=RED)
+        txt(pen, zx + ox, zy + oy, "0", zf, fill=PAPER)
+    txt(pen, zx, zy, "0", zf, fill=RED)
     cap = "fossil-fuel mentions in the final draft"
     cf = face(SANS_B, 11)
     cw_ = pen.textlength(cap, font=cf)
-    pen.text((b.x + (b.w - cw_) / 2, b.y + 64), cap, font=cf, fill=NAVY)
-    # long summit table with nameplates, two already knocked flat
-    pen.rectangle([b.x + 12, b.y + 88, b.x + b.w - 12, b.y + 97],
-                  fill=(146, 108, 66), outline=INK, width=1)
-    for i, cx in enumerate(range(b.x + 40, b.x + b.w - 24, 52)):
-        if i in (2, 5):
-            pen.polygon([(cx - 10, b.y + 84), (cx + 10, b.y + 86),
-                         (cx + 10, b.y + 93), (cx - 10, b.y + 91)],
-                        fill=(255, 255, 255), outline=INK)
-        else:
-            pen.rectangle([cx - 10, b.y + 82, cx + 10, b.y + 90],
-                          fill=(255, 255, 255), outline=INK)
-    # podium at the centre, facing rows of empty chairs
-    mid = b.x + b.w // 2
-    pen.polygon([(mid - 11, b.y + 101), (mid + 11, b.y + 101),
-                 (mid + 15, b.y + 122), (mid - 15, b.y + 122)], fill=NAVY,
-                outline=INK)
-    for i, cx in enumerate(range(b.x + 40, b.x + b.w - 24, 52)):
-        if abs(cx - mid) < 30:
-            continue
-        _seat(pen, cx, b.y + 103, 22, 20, NAVY, tipped=(i == 5))
-    for i, cx in enumerate(range(b.x + 28, b.x + b.w - 12, 52)):
-        _seat(pen, cx, b.y + 124, 24, 15, STEEL, tipped=(i == 1))
+    txt(pen, box.x + (box.w - cw_) / 2, box.y + 64, cap, cf, fill=NAVY)
 
 
 # ---------------------------------------------------------------------------
@@ -657,7 +733,7 @@ def strip(pen):
         pen.rectangle([x, y0, x + cell_w, y0 + hh], outline=LINE, width=1)
         nf = face(SANS_B, STRIP_SZ)
         nw = pen.textlength(num, font=nf)
-        pen.text((x + (cell_w - nw) / 2, y0 + 1), num, font=nf, fill=NAVY)
+        txt(pen, x + (cell_w - nw) / 2, y0 + 1, num, nf, fill=NAVY)
         lf = face(SANS, 11)
         if pen.textlength(label, font=lf) > cell_w - 10:
             raise SystemExit("strip label too wide: %r" % label)
@@ -667,28 +743,29 @@ def strip(pen):
 
 def hero(pen):
     box = Box(EDGE, 156, SPAN, 148)
-    pen.rectangle([box.x, box.y, box.x + box.w, box.y + box.h], outline=INK,
-                  width=2)
-    art_summit(pen, Box(box.x + 1, box.y + 1, 380, box.h - 2))
+    frame(pen, box, width=2)
+    hall = Box(box.x + 1, box.y + 1, 380, box.h - 2)
+    paint(pen, hall, _summit())
+    _zero(pen, hall)
     flag(pen, Box(box.x + 1, box.y + 1, 0, 0), "COP31 \u00b7 ANTALYA")
     ntag(pen, Box(box.x + 1, box.y + 1, 380, 0), 1)
     rx = 412
-    pen.text((rx, box.y + 8), "1  \u00b7  THE BIG STORY",
-             font=face(SANS_B, 12), fill=RED)
+    txt(pen, rx, box.y + 8, "1  \u00b7  THE BIG STORY", face(SANS_B, 12),
+        fill=RED)
     hf = face(SANS_B, HERO_SZ)
     lines = wrap(pen, HERO["headline"], hf, PAGE_W - EDGE - rx)
     if len(lines) > 2:
         raise SystemExit("hero headline wraps past 2 lines")
     for i, ln in enumerate(lines):
-        pen.text((rx, box.y + 28 + i * 32), ln, font=hf, fill=INK)
+        txt(pen, rx, box.y + 28 + i * 32, ln, hf)
     bf = face(SANS, 13)
     blines = wrap(pen, HERO["body"], bf, PAGE_W - EDGE - rx)
     if len(blines) > 2:
         raise SystemExit("hero body too long: %d lines" % len(blines))
     for i, ln in enumerate(blines):
-        pen.text((rx, box.y + 96 + i * 17), ln, font=bf, fill=INK)
-    pen.text((rx, box.y + box.h - 16), HERO["src"], font=face(SANS_I, 11),
-             fill=SOFT)
+        txt(pen, rx, box.y + 96 + i * 17, ln, bf)
+    txt(pen, rx, box.y + box.h - 16, HERO["src"], face(SANS_I, 11),
+        fill=SOFT)
 
 
 def cards(pen):
@@ -697,9 +774,9 @@ def cards(pen):
         row, col = divmod(i, 3)
         x = EDGE + col * (cell_w + gap)
         y = y0 + row * (ch + gap)
-        pen.rectangle([x, y, x + cell_w, y + ch], outline=INK, width=1)
+        frame(pen, Box(x, y, cell_w, ch), width=1)
         scene = Box(x + 1, y + 1, cell_w - 2, 46)
-        ART[card["scene"]](pen, scene)
+        paint(pen, scene, ART[card["scene"]])
         if card["key"] is not None:
             plate(pen, scene, card["key"])
         flag(pen, scene, card["banner"])
@@ -711,36 +788,34 @@ def cards(pen):
             raise SystemExit("card headline fails floor: %r"
                              % card["headline"])
         for j, ln in enumerate(hlines):
-            pen.text((x + 6, y + 50 + j * 21), ln, font=hf, fill=INK)
+            txt(pen, x + 6, y + 50 + j * 21, ln, hf)
         bf = face(SANS, BODY_SZ)
         blines = wrap(pen, card["body"], bf, cell_w - 12)
         if len(blines) > 2:
             raise SystemExit("card body wraps past 2 lines: %r"
                              % card["headline"])
         for j, ln in enumerate(blines):
-            pen.text((x + 6, y + 94 + j * 13), ln, font=bf, fill=INK)
-        pen.text((x + 6, y + 120), card["src"], font=face(SANS_I, 9),
-                 fill=SOFT)
+            txt(pen, x + 6, y + 94 + j * 13, ln, bf)
+        txt(pen, x + 6, y + 120, card["src"], face(SANS_I, 9), fill=SOFT)
 
 
 def wire(pen):
     y0 = 718
-    pen.text((EDGE, y0), "THE WIRE \u2014 THE OTHER 25 STORIES",
-             font=face(SANS_B, 12), fill=RED)
+    txt(pen, EDGE, y0, "THE WIRE \u2014 THE OTHER 25 STORIES",
+        face(SANS_B, 12), fill=RED)
     rule(pen, y0 + 16, width=1, fill=LINE)
     wf = face(SANS_B, WIRE_SZ)
     sf = face(SANS, 10)
-    col_a, col_b = WIRE[:13], WIRE[13:]
-    for col_idx, col in enumerate((col_a, col_b)):
+    for col_idx, col in enumerate((WIRE[:13], WIRE[13:])):
         x = EDGE + col_idx * 502
         for i, (n, _, head, src) in enumerate(col):
             y = y0 + 22 + i * 14
-            pen.text((x, y), "%d \u00b7 " % n, font=face(SANS_B, WIRE_SZ),
-                     fill=RED)
-            nx = x + pen.textlength("%d \u00b7 " % n, font=wf)
-            pen.text((nx, y), head, font=wf, fill=INK)
+            num = "%d \u00b7 " % n
+            txt(pen, x, y, num, wf, fill=RED)
+            nx = x + pen.textlength(num, font=wf)
+            txt(pen, nx, y, head, wf)
             sx = nx + pen.textlength(head, font=wf) + 4
-            pen.text((sx, y + 1), "(%s)" % src, font=sf, fill=SOFT)
+            txt(pen, sx, y + 1, "(%s)" % src, sf, fill=SOFT)
 
 
 def regions(pen, counts):
@@ -750,7 +825,7 @@ def regions(pen, counts):
         label = "%s %d" % (name, counts[key])
         tw = pen.textlength(label, font=f)
         pen.rounded_rectangle([x, y, x + tw + 18, y + hh], radius=6, fill=NAVY)
-        pen.text((x + 9, y + 4), label, font=f, fill=(255, 255, 255))
+        txt(pen, x + 9, y + 4, label, f, fill=(255, 255, 255))
         x += tw + 18 + 8
     if x - 8 > PAGE_W - EDGE:
         raise SystemExit("region chips overflow")
@@ -759,14 +834,13 @@ def regions(pen, counts):
 def datecheck(pen):
     y0, hh = 952, 52
     pen.rectangle([EDGE, y0, PAGE_W - EDGE, y0 + hh], outline=RED, width=2)
-    pen.text((EDGE + 10, y0 + 3), "DATE CHECK \u2014 WHAT WE LEFT OUT",
-             font=face(SANS_B, 11), fill=RED)
+    txt(pen, EDGE + 10, y0 + 3, "DATE CHECK \u2014 WHAT WE LEFT OUT",
+        face(SANS_B, 11), fill=RED)
     sf = face(SANS_B, 11)
     sw = pen.textlength(STAMP, font=sf)
-    pen.text((PAGE_W - EDGE - 10 - sw, y0 + 3), STAMP, font=sf, fill=RED)
+    txt(pen, PAGE_W - EDGE - 10 - sw, y0 + 3, STAMP, sf, fill=RED)
     for i, ln in enumerate(DATE_LINES):
-        pen.text((EDGE + 10, y0 + 19 + i * 12), ln, font=face(SANS, 10),
-                 fill=INK)
+        txt(pen, EDGE + 10, y0 + 19 + i * 12, ln, face(SANS, 10))
 
 
 def footer(pen):
@@ -790,16 +864,26 @@ def build_poster():
     return img
 
 
+def check_output(path):
+    """Re-open a written poster and confirm it is what we meant to draw."""
+    with Image.open(path) as im:
+        if im.size != (PAGE_W, PAGE_H):
+            raise SystemExit("poster is %r, not 1024x1024" % (im.size,))
+        if im.mode != "RGB":
+            raise SystemExit("poster mode is %s, not RGB" % im.mode)
+    blob = open(path, "rb").read()
+    if len(blob) > 1048576:
+        raise SystemExit("poster is %d bytes, over the 1 MiB cap"
+                         % len(blob))
+    return len(blob), hashlib.sha256(blob).hexdigest()
+
+
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     out = os.path.join(here, "entry.png")
-    img = build_poster()
-    img.save(out, "PNG", optimize=True)
-    data = open(out, "rb").read()
-    print("entry.png", len(data), "bytes", hashlib.sha256(data).hexdigest())
-    if len(data) > 1048576:
-        print("TOO BIG", file=sys.stderr)
-        sys.exit(1)
+    build_poster().save(out, "PNG", optimize=True)
+    size, digest = check_output(out)
+    print("poster written: %s (%d bytes, sha256 %s)" % (out, size, digest))
 
 
 if __name__ == "__main__":
